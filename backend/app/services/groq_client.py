@@ -78,55 +78,54 @@ def generate_structured_json(
     Raises provider-neutral exceptions on failure.
     Never logs credentials or authorization headers.
     """
-    model = settings.groq_model
-    if not model:
-        raise ProviderConfigError(
-            "GROQ_MODEL is not configured. "
-            "Set it in your .env file (e.g. GROQ_MODEL=llama-3.3-70b-versatile)."
-        )
-
     client = _get_client()
 
-    try:
-        logger.debug("Sending content-plan request to Groq (model=%s)", model)
-        completion = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.7,
-            max_tokens=4096,
-        )
-    except AuthenticationError as exc:
-        raise ProviderAuthError(
-            "Groq authentication failed. Check that GROQ_API_KEY is valid."
-        ) from exc
-    except RateLimitError as exc:
-        raise ProviderRateLimitError(
-            "Groq rate limit reached. Try again shortly."
-        ) from exc
-    except APITimeoutError as exc:
-        raise ProviderNetworkError(
-            "Groq request timed out. Check your network connection."
-        ) from exc
-    except APIConnectionError as exc:
-        raise ProviderNetworkError(
-            f"Could not connect to Groq: {exc}"
-        ) from exc
-    except APIStatusError as exc:
-        raise ProviderResponseError(
-            f"Groq returned HTTP {exc.status_code}. See logs for details."
-        ) from exc
+    models_to_try = []
+    if settings.groq_model:
+        models_to_try.append(settings.groq_model)
+    for m in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]:
+        if m not in models_to_try:
+            models_to_try.append(m)
 
-    raw_content = completion.choices[0].message.content
-    if not raw_content:
-        raise ProviderResponseError("Groq returned an empty response body.")
+    last_exc = None
+    for model in models_to_try:
+        try:
+            logger.info("Sending content-plan request to Groq (model=%s)", model)
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.7,
+                max_tokens=4096,
+            )
+            raw_content = completion.choices[0].message.content
+            if not raw_content:
+                continue
+            return json.loads(raw_content)
+        except AuthenticationError as exc:
+            raise ProviderAuthError(
+                "Groq authentication failed. Check that GROQ_API_KEY is valid."
+            ) from exc
+        except RateLimitError as exc:
+            logger.warning("Groq model %s rate-limited: %s", model, exc)
+            last_exc = exc
+            continue
+        except APIStatusError as exc:
+            logger.warning("Groq model %s status error (%s): %s", model, exc.status_code, exc)
+            last_exc = exc
+            continue
+        except (APITimeoutError, APIConnectionError) as exc:
+            logger.warning("Groq network error with %s: %s", model, exc)
+            last_exc = exc
+            continue
+        except json.JSONDecodeError as exc:
+            logger.warning("Groq response from %s was not valid JSON: %s", model, exc)
+            last_exc = exc
+            continue
 
-    try:
-        return json.loads(raw_content)
-    except json.JSONDecodeError as exc:
-        raise ProviderResponseError(
-            f"Groq response was not valid JSON: {exc}"
-        ) from exc
+    if last_exc:
+        raise ProviderResponseError(f"All Groq models failed. Last error: {last_exc}") from last_exc
+    raise ProviderResponseError("Groq returned an empty response.")

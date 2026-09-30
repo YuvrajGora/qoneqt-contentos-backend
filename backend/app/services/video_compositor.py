@@ -106,6 +106,9 @@ class VideoCompositor:
             "-i", aud_base,
             "-vf", vf_string,
             "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-threads", "2",
+            "-max_muxing_queue_size", "1024",
             "-tune", "stillimage",
             "-pix_fmt", "yuv420p",
             "-r", "30",
@@ -133,6 +136,8 @@ class VideoCompositor:
 
         try:
             result = subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True, timeout=120)
+            import gc
+            gc.collect()
         except subprocess.TimeoutExpired as exc:
             logger.error("FFmpeg scene clip composition timed out: %s", exc)
             raise VideoCompositionError(f"FFmpeg timed out rendering scene clip after 120 seconds: {exc}") from exc
@@ -193,6 +198,8 @@ class VideoCompositor:
 
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=180)
+            import gc
+            gc.collect()
         except subprocess.TimeoutExpired as exc:
             logger.error("FFmpeg concat timed out: %s", exc)
             raise VideoCompositionError(f"FFmpeg timed out concatenating scenes after 180 seconds: {exc}") from exc

@@ -17,6 +17,7 @@ This module has NO FastAPI dependency and can be called from:
 
 import logging
 import json
+import os
 import time
 from typing import Any, Dict
 
@@ -26,6 +27,7 @@ from google.genai import types
 
 from app.schemas.content import ContentPlan
 from app.services.prompts import SYSTEM_INSTRUCTION, build_user_prompt
+from app.services.groq_client import generate_structured_json
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -52,50 +54,77 @@ def generate_content_plan(
 ) -> ContentPlan:
     """
     Generate a validated ContentPlan for the given topic/duration/style.
-
-    Parameters
-    ----------
-    topic    : subject of the video
-    duration : total desired video length in seconds
-    style    : tone/style descriptor (e.g. "educational", "entertaining")
-    _provider_fn : optional override for the Groq call (used in tests)
-
-    Returns
-    -------
-    ContentPlan
-
-    Raises
-    ------
-    ContentPlanValidationError  – model output failed validation
-    ContentPlannerError         – provider or config error (wraps provider exceptions)
     """
     # Lazy inject
     if _provider_fn is None:
         def _default_provider(system_prompt: str | None = None, user_prompt: str | None = None, **kwargs) -> Dict[str, Any]:
-            if not settings.gemini_api_key:
-                raise ContentPlannerError("GEMINI_API_KEY is not configured.")
-            client = genai.Client(api_key=settings.gemini_api_key)
-            
-            for attempt in range(4):
+            errors = []
+
+            # 1. Attempt Gemini with automatic model fallback
+            if settings.gemini_api_key:
                 try:
-                    response = client.models.generate_content(
-                        model=settings.gemini_text_model,
-                        contents=user_prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_prompt,
-                            response_mime_type="application/json",
-                            response_schema=ContentPlan,
-                        ),
+                    client = genai.Client(api_key=settings.gemini_api_key)
+                    models_to_try = [settings.gemini_text_model]
+                    for m in ["gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-3.5-flash", "gemini-3.7-flash"]:
+                        if m not in models_to_try:
+                            models_to_try.append(m)
+
+                    for model in models_to_try:
+                        for attempt in range(2):
+                            try:
+                                logger.info("Calling Gemini for content planning (model=%s, attempt=%d)", model, attempt + 1)
+                                response = client.models.generate_content(
+                                    model=model,
+                                    contents=user_prompt,
+                                    config=types.GenerateContentConfig(
+                                        system_instruction=system_prompt,
+                                        response_mime_type="application/json",
+                                        response_schema=ContentPlan,
+                                    ),
+                                )
+                                if response.text:
+                                    return json.loads(response.text)
+                            except Exception as ge:
+                                err_str = str(ge)
+                                is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()
+                                if is_quota:
+                                    logger.warning("Gemini model %s quota exhausted (429 RESOURCE_EXHAUSTED). Skipping retries on this model.", model)
+                                    errors.append(f"Gemini {model}: 429 quota exhausted")
+                                    break  # Do not waste time retrying daily quota exhaustion on same model
+                                else:
+                                    logger.warning("Gemini model %s error: %s", model, err_str)
+                                    errors.append(f"Gemini {model}: {err_str}")
+                                    if attempt < 1:
+                                        time.sleep(1)
+                                        continue
+                                    break
+                except Exception as ce:
+                    errors.append(f"Gemini client initialization failed: {ce}")
+            else:
+                errors.append("GEMINI_API_KEY not configured")
+
+            # 2. Attempt Groq fallback if configured
+            groq_key = settings.groq_api_key or os.getenv("GROQ_API_KEY")
+            if groq_key:
+                try:
+                    logger.info("Attempting Groq fallback for content planning...")
+                    groq_data = generate_structured_json(
+                        system_prompt=system_prompt or SYSTEM_INSTRUCTION,
+                        user_prompt=user_prompt or ""
                     )
-                    return json.loads(response.text)
-                except Exception as e:
-                    if attempt < 3:
-                        delay = 2 ** attempt
-                        print(f"Gemini API overloaded. Retrying in {delay}s (Attempt {attempt + 1}/4)...")
-                        time.sleep(delay)
-                        continue
-                    raise e
-            
+                    if groq_data:
+                        logger.info("Content planning succeeded via Groq fallback.")
+                        return groq_data
+                except Exception as groq_err:
+                    logger.warning("Groq fallback failed: %s", groq_err)
+                    errors.append(f"Groq fallback: {groq_err}")
+            else:
+                errors.append("GROQ_API_KEY not configured for fallback")
+
+            # 3. All failed — raise structured error
+            error_details = "; ".join(errors)
+            raise ContentPlannerError(f"Content planning failed across all AI providers. Details: {error_details}")
+
         _provider_fn = _default_provider
 
     system_prompt = SYSTEM_INSTRUCTION

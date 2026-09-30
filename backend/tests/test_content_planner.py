@@ -226,3 +226,48 @@ def test_duration_coverage_out_of_tolerance():
     raw = _make_valid_raw(scenes=scenes)
     with pytest.raises(ContentPlanValidationError, match="duration"):
         generate_content_plan("solar energy", 45, "educational", _provider_fn=_mock_provider(raw))
+
+
+# ---------------------------------------------------------------------------
+# 11. Gemini 429 Quota Exhaustion triggers Groq fallback
+# ---------------------------------------------------------------------------
+
+def test_gemini_429_triggers_groq_fallback():
+    raw = _make_valid_raw(title="Groq Fallback Plan")
+    with patch("google.genai.Client") as mock_client, \
+         patch("app.services.content_planner.generate_structured_json") as mock_groq, \
+         patch("app.core.config.settings.gemini_api_key", "test-gemini-key"), \
+         patch("app.core.config.settings.groq_api_key", "test-groq-key"):
+        
+        mock_instance = mock_client.return_value
+        mock_instance.models.generate_content.side_effect = Exception(
+            "429 RESOURCE_EXHAUSTED: Quota exceeded for metric free_tier_requests, limit: 20, model: gemini-3.5-flash"
+        )
+        mock_groq.return_value = raw
+        
+        plan = generate_content_plan("solar energy", 45, "educational")
+        assert plan.title == "Groq Fallback Plan"
+        mock_groq.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 12. Graceful failure when all providers fail
+# ---------------------------------------------------------------------------
+
+def test_all_providers_failure_raises_structured_error():
+    with patch("google.genai.Client") as mock_client, \
+         patch("app.services.content_planner.generate_structured_json") as mock_groq, \
+         patch("app.core.config.settings.gemini_api_key", "test-gemini-key"), \
+         patch("app.core.config.settings.groq_api_key", "test-groq-key"):
+        
+        mock_client.return_value.models.generate_content.side_effect = Exception("429 RESOURCE_EXHAUSTED")
+        mock_groq.side_effect = Exception("Groq connection timeout")
+        
+        with pytest.raises(ContentPlannerError) as exc_info:
+            generate_content_plan("solar energy", 45, "educational")
+            
+        err = str(exc_info.value)
+        assert "Content planning failed across all AI providers" in err
+        assert "429 quota exhausted" in err
+        assert "Groq connection timeout" in err
+

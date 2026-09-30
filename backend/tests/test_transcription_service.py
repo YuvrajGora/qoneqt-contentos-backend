@@ -105,3 +105,36 @@ def test_format_timestamp():
     assert format_timestamp(3600.001) == "01:00:00,001"
     # Rounding tests
     assert format_timestamp(1.9999) == "00:00:02,000"
+
+
+def test_generate_scene_srt_lightweight_script_bypasses_whisper(transcription_service, mock_whisper, mock_audio):
+    audio_path, tmp_path = mock_audio
+    with patch("app.services.transcription_service.TEMP_ASSETS_DIR", tmp_path):
+        srt_path = transcription_service.generate_scene_srt(
+            job_id="job_light",
+            scene_id=1,
+            audio_path=audio_path,
+            narration="Artificial intelligence is transforming the landscape of modern software development rapidly.",
+            duration=6.0,
+        )
+        assert Path(srt_path).exists()
+        content = Path(srt_path).read_text(encoding="utf-8")
+        assert "Artificial intelligence is" in content
+        # Whisper model should NEVER have been invoked!
+        mock_whisper.transcribe.assert_not_called()
+
+
+def test_generate_timed_srt_from_script(transcription_service, tmp_path):
+    with patch("app.services.transcription_service.TEMP_ASSETS_DIR", tmp_path):
+        srt_path = transcription_service.generate_timed_srt_from_script(
+            job_id="job_script",
+            scene_id=2,
+            narration="One two three four five six",
+            audio_duration=4.0,
+            chunk_word_count=3,
+        )
+        assert Path(srt_path).exists()
+        content = Path(srt_path).read_text(encoding="utf-8")
+        assert "1\n00:00:00,000 --> 00:00:02,000\nOne two three\n\n" in content
+        assert "2\n00:00:02,000 --> 00:00:04,000\nfour five six\n\n" in content
+

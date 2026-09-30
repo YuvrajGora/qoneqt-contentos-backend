@@ -79,10 +79,15 @@ async def run_generation_pipeline(job_id: str, topic: str, duration: int, style:
             job_store.add_activity_log(job_id, f"Scene {scene_id}: Generating voiceover narration", "voice_generation")
             audio_path = await tts_generator.generate_scene_audio(job_id, scene_id, scene.narration, style=style)
             
-            # Generate Subtitles (sync model execution wrapped in thread)
+            # Generate Subtitles (lightweight script-based timing: 0 MB RAM)
             job_store.add_activity_log(job_id, f"Scene {scene_id}: Transcribing subtitles", "caption_generation")
             srt_path = await asyncio.to_thread(
-                transcription_service.generate_scene_srt, job_id, scene_id, audio_path
+                transcription_service.generate_scene_srt,
+                job_id,
+                scene_id,
+                audio_path,
+                narration=scene.narration,
+                duration=scene.duration,
             )
             
             asset_scenes.append({
@@ -96,6 +101,10 @@ async def run_generation_pipeline(job_id: str, topic: str, duration: int, style:
             # Progress updates smoothly from 10% to 80%
             progress = 10 + int(((idx + 1) / total_scenes) * 70)
             job_store.update_job(job_id, progress=progress)
+
+            # Eagerly collect garbage to keep container memory well below 512MB
+            import gc
+            gc.collect()
 
         # ---------------------------------------------------------
         # Step 3: Compositing & Uploading
