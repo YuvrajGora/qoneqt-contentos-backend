@@ -2,7 +2,8 @@ services:
   - type: web
     name: qoneqt-ai-backend
     env: docker
-    rootDir: backend
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
     plan: free
     envVars:
       - key: PORT

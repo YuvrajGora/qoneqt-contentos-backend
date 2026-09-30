@@ -11,11 +11,11 @@ RUN apt-get update && apt-get install -y ffmpeg libgomp1 && rm -rf /var/lib/apt/
 WORKDIR /app
 
 # Copy requirements and install
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire backend directory
-COPY . /app
+# Copy backend application code
+COPY backend/ .
 
 # Create temp_assets directory
 RUN mkdir -p /app/temp_assets

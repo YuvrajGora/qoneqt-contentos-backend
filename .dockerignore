@@ -18,7 +18,6 @@ backend/temp_assets/
 *.mp3
 *.png
 *.srt
-*.txt
 scratch/
 backend/scratch/
 .git/
