@@ -23,5 +23,5 @@ RUN mkdir -p /app/temp_assets
 # Expose port
 EXPOSE 8000
 
-# Run FastAPI app
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run FastAPI app with single worker to preserve in-memory JobStore state and fit 512MB RAM
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
