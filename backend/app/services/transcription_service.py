@@ -1,0 +1,104 @@
+"""
+Transcription Service — Milestone 6.
+
+Uses faster-whisper to extract word-level timestamps and generate short, punchy SRT files.
+"""
+
+import logging
+from pathlib import Path
+
+from faster_whisper import WhisperModel
+from app.services.image_generator import TEMP_ASSETS_DIR
+
+logger = logging.getLogger(__name__)
+
+class TranscriptionError(Exception):
+    """Raised for any failure during transcription or SRT generation."""
+
+def format_timestamp(seconds: float) -> str:
+    """Formats a time in seconds to SRT strict format HH:MM:SS,mmm"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    # If ms rounds to 1000, we could roll over, but for rough precision this is fine.
+    # We will handle it by just keeping ms constrained.
+    if ms >= 1000:
+        secs += ms // 1000
+        ms = ms % 1000
+        if secs >= 60:
+            minutes += secs // 60
+            secs = secs % 60
+            if minutes >= 60:
+                hours += minutes // 60
+                minutes = minutes % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+class TranscriptionService:
+    def __init__(self):
+        self._model = None
+
+    @property
+    def model(self):
+        if self._model is None:
+            try:
+                # use tiny.en for fast hackathon CPU inference
+                self._model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+            except Exception as exc:
+                raise TranscriptionError(f"Failed to initialize WhisperModel: {exc}") from exc
+        return self._model
+
+    def generate_scene_srt(self, job_id: str, scene_id: int, audio_path: str) -> str:
+        """
+        Transcribes the audio file and writes an SRT subtitle file.
+        Chunks subtitles to 3-4 words for short-form video style.
+        """
+        if not Path(audio_path).exists():
+            raise TranscriptionError(f"Audio file not found: {audio_path}")
+
+        logger.info("Transcribing audio for scene %d...", scene_id)
+        
+        try:
+            # Must explicitly request word_timestamps=True
+            segments, info = self.model.transcribe(audio_path, word_timestamps=True)
+        except Exception as exc:
+            raise TranscriptionError(f"faster-whisper failed to transcribe: {exc}") from exc
+
+        TEMP_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        srt_path = TEMP_ASSETS_DIR / f"{job_id}_scene_{scene_id}.srt"
+        
+        try:
+            with open(srt_path, "w", encoding="utf-8") as f:
+                idx = 1
+                for segment in segments:
+                    if not segment.words:
+                        continue
+                    
+                    chunk = []
+                    chunk_start = None
+                    chunk_end = None
+                    
+                    for i, word in enumerate(segment.words):
+                        if not chunk:
+                            chunk_start = word.start
+                        chunk.append(word.word.strip())
+                        chunk_end = word.end
+                        
+                        # Chunk size of 3
+                        if len(chunk) >= 3 or i == len(segment.words) - 1:
+                            f.write(f"{idx}\n")
+                            f.write(f"{format_timestamp(chunk_start)} --> {format_timestamp(chunk_end)}\n")
+                            f.write(f"{' '.join(chunk)}\n\n")
+                            idx += 1
+                            chunk = []
+                            chunk_start = None
+                            chunk_end = None
+                            
+        except IOError as exc:
+            raise TranscriptionError(f"Failed to write SRT file: {exc}") from exc
+
+        logger.info("SRT generated: %s", srt_path)
+        return str(srt_path.resolve())
+
+# Module-level singleton
+transcription_service = TranscriptionService()
