@@ -6,6 +6,7 @@ ALL tests are fully mocked — no API key required, no network calls made.
 
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from PIL import Image
 
 import pytest
 
@@ -49,7 +50,6 @@ class TestGenerateSceneImage:
         mock_client, tmp_path, _ = mock_hf_client
         
         mock_image = MagicMock()
-        # when image.save(path) is called, actually create a dummy file there
         def fake_save(path):
             Path(path).write_bytes(b"fake_png_data")
             
@@ -80,25 +80,23 @@ class TestGenerateSceneImage:
 
         assert Path(path).name == "abc-xyz-123_scene_7.png"
 
-    def test_raises_on_api_error(self, mock_hf_client):
-        """API exceptions must be wrapped in ImageGenerationError."""
+    def test_raises_on_api_error_when_fallback_disabled(self, mock_hf_client):
+        """API exceptions must be wrapped in ImageGenerationError when fallback is disabled."""
         mock_client, tmp_path, _ = mock_hf_client
-        
         mock_client.text_to_image.side_effect = Exception("500 Server Error")
 
         ig = ImageGenerator()
         with pytest.raises(ImageGenerationError, match="Hugging Face image generation failed"):
-            ig.generate_scene_image("job-005", 1, "Clear blue sky with clouds")
+            ig.generate_scene_image("job-005", 1, "Clear blue sky with clouds", allow_fallback=False)
 
-    def test_raises_on_network_error(self, mock_hf_client):
-        """Network exceptions must be wrapped in ImageGenerationError."""
+    def test_raises_on_network_error_when_fallback_disabled(self, mock_hf_client):
+        """Network exceptions must be wrapped in ImageGenerationError when fallback is disabled."""
         mock_client, tmp_path, _ = mock_hf_client
-        
         mock_client.text_to_image.side_effect = ConnectionError("Network unreachable")
 
         ig = ImageGenerator()
         with pytest.raises(ImageGenerationError, match="Hugging Face image generation failed"):
-            ig.generate_scene_image("job-005", 1, "Clear blue sky with clouds")
+            ig.generate_scene_image("job-005", 1, "Clear blue sky with clouds", allow_fallback=False)
 
     def test_raises_on_empty_prompt(self, mock_hf_client):
         """An empty visual prompt must raise ImageGenerationError before calling the API."""
@@ -111,18 +109,17 @@ class TestGenerateSceneImage:
         # Ensure we never even called the API
         mock_client.text_to_image.assert_not_called()
 
-    def test_raises_when_api_key_missing(self, mock_hf_client):
-        """Missing HF_TOKEN must raise ImageGenerationError with a clear message."""
+    def test_raises_when_api_key_missing_and_fallback_disabled(self, mock_hf_client):
+        """Missing HF_TOKEN must raise ImageGenerationError when fallback is disabled."""
         mock_client, tmp_path, mock_getenv = mock_hf_client
         
-        # We need to un-patch settings.hf_token to be None, or just set it manually
         with patch("app.services.image_generator.settings") as mock_settings:
             mock_settings.hf_token = None
             mock_getenv.return_value = None
             
             ig = ImageGenerator()
             with pytest.raises(ImageGenerationError, match="HF_TOKEN is not configured"):
-                ig.generate_scene_image("job-008", 1, "A sunny landscape")
+                ig.generate_scene_image("job-008", 1, "A sunny landscape", allow_fallback=False)
 
     def test_different_scenes_produce_different_paths(self, mock_hf_client):
         """Each scene_id should produce a unique file name."""
@@ -138,3 +135,39 @@ class TestGenerateSceneImage:
         assert path1 != path2
         assert "scene_1" in path1
         assert "scene_2" in path2
+
+    def test_hf_402_depleted_credits_immediately_triggers_fallback(self, mock_hf_client):
+        """HF 402 Payment Required must immediately fall back without useless retries."""
+        mock_client, tmp_path, _ = mock_hf_client
+        mock_client.text_to_image.side_effect = Exception(
+            "Client error '402 Payment Required': You have depleted your monthly included credits."
+        )
+
+        ig = ImageGenerator()
+        path = ig.generate_scene_image("job-fallback", 1, "Neural network visual synthesis")
+
+        # Must have fallen back and generated real PNG
+        assert Path(path).exists()
+        assert Path(path).name == "job-fallback_scene_1.png"
+        # Must only have been called ONCE (skipped retrying on 402)
+        assert mock_client.text_to_image.call_count == 1
+
+        # Verify image properties
+        with Image.open(path) as img:
+            assert img.size == (1080, 1920)
+            assert img.format == "PNG"
+
+    def test_missing_hf_token_uses_fallback(self, mock_hf_client):
+        """When HF_TOKEN is not set, fallback automatically generates the scene image."""
+        mock_client, tmp_path, mock_getenv = mock_hf_client
+        with patch("app.services.image_generator.settings") as mock_settings:
+            mock_settings.hf_token = None
+            mock_getenv.return_value = None
+            
+            ig = ImageGenerator()
+            path = ig.generate_scene_image("job-notoken", 2, "Decentralized computing nodes")
+            
+            assert Path(path).exists()
+            assert Path(path).name == "job-notoken_scene_2.png"
+            with Image.open(path) as img:
+                assert img.size == (1080, 1920)
